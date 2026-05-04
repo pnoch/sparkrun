@@ -234,10 +234,10 @@ class TestValidateIbConnectivity:
         assert result == ib_map
 
     @patch("sparkrun.orchestration.ssh.run_remote_command")
-    def test_reachable_returns_original_map(self, mock_cmd):
-        """When IB IP is reachable, returns the original map."""
+    def test_reachable_returns_reachable_map(self, mock_cmd):
+        """When all IB IPs are reachable, returns map with reachable IPs."""
         mock_cmd.return_value = RemoteResult(
-            host="10.0.0.1",
+            host="dummy",
             returncode=0,
             stdout="",
             stderr="",
@@ -246,19 +246,13 @@ class TestValidateIbConnectivity:
         result = validate_ib_connectivity(ib_map, ssh_kwargs={"ssh_user": "user"})
 
         assert result == ib_map
-        mock_cmd.assert_called_once_with(
-            "10.0.0.1",
-            "true",
-            connect_timeout=5,
-            timeout=10,
-            ssh_user="user",
-        )
+        assert mock_cmd.call_count == 2
 
     @patch("sparkrun.orchestration.ssh.run_remote_command")
     def test_unreachable_returns_empty(self, mock_cmd):
-        """When IB IP is unreachable, returns empty dict (fallback)."""
+        """When all IB IPs are unreachable, returns empty dict (fallback)."""
         mock_cmd.return_value = RemoteResult(
-            host="10.0.0.1",
+            host="dummy",
             returncode=255,
             stdout="",
             stderr="Connection timed out",
@@ -268,6 +262,31 @@ class TestValidateIbConnectivity:
 
         assert result == {}
 
+    @patch("sparkrun.orchestration.ssh.run_remote_command")
+    def test_partial_reachable_returns_reachable_only(self, mock_cmd):
+        """When some IB IPs are reachable, returns only reachable hosts."""
+        def side_effect(host, cmd, **kw):
+            rc = 0 if host == "10.0.0.2" else 255
+            return RemoteResult(host=host, returncode=rc, stdout="", stderr="")
+        mock_cmd.side_effect = side_effect
+        ib_map = {"spark1": "10.0.0.1", "spark2": "10.0.0.2"}
+        result = validate_ib_connectivity(ib_map)
+
+        assert result == {"spark2": "10.0.0.2"}
+
+    @patch("sparkrun.orchestration.ssh.run_remote_command")
+    def test_comma_separated_ips_picks_first_reachable(self, mock_cmd):
+        """Comma-separated IPs per host: first unreachable skips to next."""
+        def side_effect(host, cmd, **kw):
+            rc = 0 if host == "10.0.0.3" else 255
+            return RemoteResult(host=host, returncode=rc, stdout="", stderr="")
+        mock_cmd.side_effect = side_effect
+        ib_map = {"spark1": "10.0.0.1,10.0.0.3"}
+        result = validate_ib_connectivity(ib_map)
+
+        assert result == {"spark1": "10.0.0.3"}
+        assert mock_cmd.call_count == 2
+
 
 # ---------------------------------------------------------------------------
 # generate_ring_nccl_overrides tests
@@ -275,27 +294,22 @@ class TestValidateIbConnectivity:
 
 
 def test_ring_nccl_overrides_keys():
-    """Ring overrides contain the expected NCCL variables."""
+    """Ring overrides set NCCL_NET=Socket for direct CX7 links."""
     overrides = generate_ring_nccl_overrides({})
-    assert overrides["NCCL_NET_PLUGIN"] == "none"
-    assert overrides["NCCL_IB_SUBNET_AWARE_ROUTING"] == "1"
-    assert overrides["NCCL_IB_MERGE_NICS"] == "0"
-    assert len(overrides) == 3
+    assert overrides["NCCL_NET"] == "Socket"
+    assert len(overrides) == 1
 
 
 def test_generate_nccl_env_ring_topology():
-    """Ring topology adds ring-specific overrides."""
+    """Ring topology adds Socket transport override."""
     ib_info = {
         "IB_DETECTED": "1",
         "DETECTED_GID_INDEX": "3",
         "DETECTED_HCA_LIST": "mlx5_0,mlx5_1",
     }
     env = generate_nccl_env(ib_info, topology="ring")
-    assert env["NCCL_NET_PLUGIN"] == "none"
-    assert env["NCCL_IB_SUBNET_AWARE_ROUTING"] == "1"
-    assert env["NCCL_IB_MERGE_NICS"] == "0"
-    # Standard IB vars still present
-    assert env["NCCL_NET"] == "IB"
+    assert env["NCCL_NET"] == "Socket"
+    # IB vars still present
     assert env["NCCL_IB_HCA"] == "mlx5_0,mlx5_1"
 
 

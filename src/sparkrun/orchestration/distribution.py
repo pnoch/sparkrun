@@ -62,6 +62,7 @@ def resolve_auto_transfer_mode(
     host_list: list[str],
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
+    topology: str | None = None,
 ) -> TransferModeResult:
     """Resolve ``"auto"`` transfer mode to a concrete strategy.
 
@@ -105,7 +106,7 @@ def resolve_auto_transfer_mode(
     # resolve definitively and cache results for distribute_resources().
     from sparkrun.orchestration.infiniband import detect_ib_for_hosts, validate_ib_connectivity
 
-    ib_result = detect_ib_for_hosts(host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+    ib_result = detect_ib_for_hosts(host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run, topology=topology)
     ib_validated = validate_ib_connectivity(ib_result.ib_ip_map, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
 
     if ib_validated:
@@ -307,6 +308,7 @@ def distribute_resources(
     transfer_interface: str | None = None,
     local_cache_dir: str | None = None,
     pre_ib: TransferModeResult | None = None,
+    topology: str | None = None,
 ) -> tuple["ClusterCommEnv | None", dict[str, str], dict[str, str]]:
     """Detect IB, distribute container image and model to target hosts.
 
@@ -414,6 +416,7 @@ def distribute_resources(
             host_list,
             ssh_kwargs=ssh_kwargs,
             dry_run=dry_run,
+            topology=topology,
         )
         # Validate IB connectivity for auto/local modes
         _ib_validated: dict[str, str] | None = None
@@ -463,17 +466,23 @@ def distribute_resources(
         # Local mode: use validated IB IPs for direct transfers
         ib_ip_map = _ib_validated or {}
         if ib_ip_map and not _use_mgmt:
-            transfer_hosts = [ib_result.ib_ip_map.get(h, h) for h in host_list]
+            transfer_hosts = [ib_ip_map.get(h, h) for h in host_list]
             logger.info(
                 "Using IB network for transfers (%d/%d hosts)",
-                len(ib_result.ib_ip_map),
+                len(ib_ip_map),
                 len(host_list),
             )
     else:
         # Push/delegated: control is external, skip IB validation for
         # control→host transfers.  Use IB IPs only for head→worker transfers.
+        # Note: ib_result.ib_ip_map may contain comma-separated IPs from
+        # ring topologies — extract the first IP for worker transfer hosts.
         if len(host_list) > 1 and ib_result.ib_ip_map and not _use_mgmt:
-            worker_transfer_hosts = [ib_result.ib_ip_map.get(h, h) for h in host_list[1:]]
+            worker_ips = []
+            for h in host_list[1:]:
+                raw = ib_result.ib_ip_map.get(h, h)
+                worker_ips.append(raw.split(",")[0].strip() if "," in raw else raw)
+            worker_transfer_hosts = worker_ips
             logger.info(
                 "External control node: using IB for head→worker transfers (%d workers)",
                 len(host_list) - 1,

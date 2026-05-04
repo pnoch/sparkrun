@@ -90,14 +90,12 @@ def parse_ib_detect_output(output: str) -> dict[str, str]:
 def generate_ring_nccl_overrides(ib_info: dict[str, str]) -> dict[str, str]:
     """NCCL overrides required for 3-node ring/mesh topology.
 
-    Ring topologies use direct CX7 links without a switch, so the
-    standard IB transport plugin cannot be used.  These variables
-    force socket-based NCCL transport with subnet-aware routing.
+    Ring topologies use direct CX7 links without a switch, so
+    RoCEv2/IB transport cannot work (no fabric routing).  Force
+    Socket transport (TCP) instead.
     """
     return {
-        "NCCL_NET_PLUGIN": "none",
-        "NCCL_IB_SUBNET_AWARE_ROUTING": "1",
-        "NCCL_IB_MERGE_NICS": "0",
+        "NCCL_NET": "Socket",
     }
 
 
@@ -175,6 +173,7 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
     env["NODE_IP"] = ib_info.get("DETECTED_MGMT_IP", "")
 
     if topology == "ring":
+        logger.info("  Applying ring/mesh NCCL overrides (Socket transport)")
         env.update(generate_ring_nccl_overrides(ib_info))
     elif ib_info.get("DETECTED_GID_INDEX"):  # only do group ID for non-mesh topologies
         env["NCCL_IB_GID_INDEX"] = ib_info["DETECTED_GID_INDEX"]
@@ -204,49 +203,58 @@ def validate_ib_connectivity(
 ) -> dict[str, str]:
     """Validate that the control machine can reach detected IB IPs.
 
-    Tests SSH connectivity from the control machine to a sample IB IP.
-    If the control machine is not on the InfiniBand network, the IB IPs
-    are unreachable and transfers must fall back to management IPs.
-
-    Only one IB IP is tested since all are on the same subnet — if one
-    is reachable, the rest should be too.
+    Tests SSH connectivity from the control machine to each IB IP.
+    In ring topologies a host may have IB interfaces on links not
+    reachable from the control node, so each IP is tested and the
+    first reachable one per host is selected.
 
     Args:
-        ib_ip_map: Mapping of management host → IB IP (from detection).
+        ib_ip_map: Mapping of management host → IB IP(s).  Values may
+            contain comma-separated IPs (e.g. from ring topologies).
         ssh_kwargs: SSH connection parameters (user, key, options).
         dry_run: Skip the check and return the map unchanged.
 
     Returns:
-        The original *ib_ip_map* if connectivity is confirmed, or an
-        empty dict if the IB network is unreachable from the control
-        machine (signalling fallback to management network).
+        A dict with one reachable IB IP per host.  Returns empty dict
+        if none are reachable (signals fallback to management network).
     """
     if not ib_ip_map or dry_run:
         return ib_ip_map
 
     from sparkrun.orchestration.ssh import run_remote_command
 
-    # Test connectivity to the first IB IP
-    test_host, test_ip = next(iter(ib_ip_map.items()))
     kw = ssh_kwargs or {}
+    reachable: dict[str, str] = {}
 
-    logger.info("Verifying IB network reachability from control machine (testing %s)...", test_ip)
-    result = run_remote_command(
-        test_ip,
-        "true",
-        connect_timeout=5,
-        timeout=10,
-        **kw,
-    )
+    for host, raw_ips in ib_ip_map.items():
+        candidates = [ip.strip() for ip in raw_ips.split(",") if ip.strip()]
+        picked = None
+        for ip in candidates:
+            logger.info("Verifying IB reachability for %s (%s)...", host, ip)
+            result = run_remote_command(
+                ip,
+                "true",
+                connect_timeout=5,
+                timeout=10,
+                **kw,
+            )
+            if result.success:
+                picked = ip
+                logger.info("  %s: IB reachable at %s", host, ip)
+                break
+            else:
+                logger.info("  %s: IB unreachable at %s, trying next", host, ip)
+        if picked:
+            reachable[host] = picked
+        else:
+            logger.warning("  %s: no reachable IB IPs among %s", host, ", ".join(candidates))
 
-    if result.success:
-        logger.info("  IB network reachable — will use IB IPs for transfers")
-        return ib_ip_map
+    if reachable:
+        logger.info("  IB network reachable (%d/%d hosts) — will use IB IPs for transfers", len(reachable), len(ib_ip_map))
+        return reachable
 
     logger.warning(
-        "  Control machine cannot reach IB network (tested %s for host %s) — falling back to management network for transfers",
-        test_ip,
-        test_host,
+        "  Control machine cannot reach IB network — falling back to management network for transfers",
     )
     return {}
 
@@ -305,11 +313,12 @@ def detect_ib_for_hosts(
             if result.host == head_host:
                 logger.info("  InfiniBand detected on %s, comm env configured", head_host)
 
-        # IB IP for transfer routing
+        # IB IP for transfer routing — store ALL IPs so validate_ib_connectivity
+        # can pick the one reachable from the control node (critical for ring topologies)
         ib_ips = extract_ib_ips(ib_info)
         if ib_ips:
-            ib_ip_map[result.host] = ib_ips[0]
-            logger.debug("  %s IB transfer IP: %s", result.host, ib_ips[0])
+            ib_ip_map[result.host] = ",".join(ib_ips)
+            logger.debug("  %s IB transfer IPs: %s", result.host, ", ".join(ib_ips))
 
         # Management IP (from default route interface)
         mgmt_ip = ib_info.get("DETECTED_MGMT_IP", "").strip()
