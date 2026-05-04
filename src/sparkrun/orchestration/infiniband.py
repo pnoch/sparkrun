@@ -90,12 +90,14 @@ def parse_ib_detect_output(output: str) -> dict[str, str]:
 def generate_ring_nccl_overrides(ib_info: dict[str, str]) -> dict[str, str]:
     """NCCL overrides required for 3-node ring/mesh topology.
 
-    Ring topologies use direct CX7 links without a switch, so
-    RoCEv2/IB transport cannot work (no fabric routing).  Force
-    Socket transport (TCP) instead.
+    Ring topologies use direct CX7 links without a switch, so the
+    standard IB transport plugin cannot route between subnets.
+    Enable the nccl-mesh-plugin for subnet-aware RoCEv2 transport
+    and add a barrier delay so the plugin can finish RDMA setup.
     """
     return {
-        "NCCL_NET": "Socket",
+        "NCCL_NET_PLUGIN": "/cache/huggingface/libnccl-net.so",
+        "VLLM_NCCL_INIT_DELAY": "2.0",
     }
 
 
