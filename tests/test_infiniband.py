@@ -294,11 +294,10 @@ class TestValidateIbConnectivity:
 
 
 def test_ring_nccl_overrides_keys():
-    """Ring overrides set NCCL_NET_PLUGIN for nccl-mesh-plugin."""
+    """Ring overrides set NCCL_NET=Socket for direct CX7 links."""
     overrides = generate_ring_nccl_overrides({})
-    assert overrides["NCCL_NET_PLUGIN"] == "/cache/huggingface/libnccl-net.so"
-    assert overrides["VLLM_NCCL_INIT_DELAY"] == "2.0"
-    assert len(overrides) == 2
+    assert overrides["NCCL_NET"] == "Socket"
+    assert len(overrides) == 1
 
 
 def test_generate_nccl_env_ring_topology():
@@ -309,10 +308,9 @@ def test_generate_nccl_env_ring_topology():
         "DETECTED_HCA_LIST": "mlx5_0,mlx5_1",
     }
     env = generate_nccl_env(ib_info, topology="ring")
-    assert env["NCCL_NET"] == "IB"
-    assert env["NCCL_NET_PLUGIN"] == "/cache/huggingface/libnccl-net.so"
-    assert env["VLLM_NCCL_INIT_DELAY"] == "2.0"
-    assert env["NCCL_IB_HCA"] == "mlx5_0,mlx5_1"
+    assert env["NCCL_NET"] == "Socket"
+    assert "NCCL_IB_HCA" not in env
+    assert "NCCL_IB_DISABLE" not in env
 
 
 def test_generate_nccl_env_no_ring_topology():

@@ -90,14 +90,13 @@ def parse_ib_detect_output(output: str) -> dict[str, str]:
 def generate_ring_nccl_overrides(ib_info: dict[str, str]) -> dict[str, str]:
     """NCCL overrides required for 3-node ring/mesh topology.
 
-    Ring topologies use direct CX7 links without a switch, so the
-    standard IB transport plugin cannot route between subnets.
-    Enable the nccl-mesh-plugin for subnet-aware RoCEv2 transport
-    and add a barrier delay so the plugin can finish RDMA setup.
+    Ring topologies use direct CX7 links without a switch, so
+    RoCEv2/IB transport cannot work (no fabric routing).  Force
+    Socket transport (TCP) instead.  IB-related env vars are
+    stripped by the caller to prevent conflicts.
     """
     return {
-        "NCCL_NET_PLUGIN": "/cache/huggingface/libnccl-net.so",
-        "VLLM_NCCL_INIT_DELAY": "2.0",
+        "NCCL_NET": "Socket",
     }
 
 
@@ -122,6 +121,9 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
         "NCCL_IB_DISABLE": "0",
         "NCCL_CROSS_NIC": "1",
     }
+    if topology != "ring":
+        if ib_info.get("DETECTED_HCA_LIST"):
+            env["NCCL_IB_HCA"] = ib_info["DETECTED_HCA_LIST"]
 
     def _set_eth_interfaces(target):
         net_list = ib_info[target]
@@ -131,15 +133,6 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
         env["TP_SOCKET_IFNAME"] = net_list
 
     def _nccl_socket_ifname_list(mgmt_if: str | None, ib_nets: str) -> str:
-        """Build an ordered, deduped NCCL_SOCKET_IFNAME list.
-
-        NCCL accepts a comma-separated list and tries them in order.
-        Put the mgmt/default-route interface first (that's the one
-        reachable from the control machine and between hosts for
-        bootstrap / rendezvous TCP), then fall through to the
-        detected IB adapters so NCCL has options if mgmt is missing.
-        Duplicates are preserved in order of first appearance.
-        """
         parts: list[str] = []
         seen: set[str] = set()
         if mgmt_if:
@@ -154,30 +147,30 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
                 seen.add(ifname)
         return ",".join(parts)
 
-    if ib_info.get("DETECTED_HCA_LIST"):
-        env["NCCL_IB_HCA"] = ib_info["DETECTED_HCA_LIST"]
-    if ib_info.get("DETECTED_SOCKET_IFNAME"):  # prefer MGMT/default interface for non-IB HCA adapters since it works for mesh or non-mesh
+    if ib_info.get("DETECTED_SOCKET_IFNAME"):
         _set_eth_interfaces("DETECTED_SOCKET_IFNAME")
         env["NCCL_SOCKET_IFNAME"] = _nccl_socket_ifname_list(
             ib_info["DETECTED_SOCKET_IFNAME"],
             ib_info.get("DETECTED_NET_LIST", ""),
         )
-    elif ib_info.get("DETECTED_NET_LIST"):  # fallback to specifying CX7 interfaces
+    elif ib_info.get("DETECTED_NET_LIST"):
         _set_eth_interfaces("DETECTED_NET_LIST")
         env["NCCL_SOCKET_IFNAME"] = _nccl_socket_ifname_list(
             None,
             ib_info["DETECTED_NET_LIST"],
         )
+
     if ib_info.get("DETECTED_UCX_LIST"):
         env["UCX_NET_DEVICES"] = ib_info["DETECTED_UCX_LIST"]
 
-    # add NODE_IP for management interface for ray script compatibility
     env["NODE_IP"] = ib_info.get("DETECTED_MGMT_IP", "")
 
     if topology == "ring":
         logger.info("  Applying ring/mesh NCCL overrides (Socket transport)")
         env.update(generate_ring_nccl_overrides(ib_info))
-    elif ib_info.get("DETECTED_GID_INDEX"):  # only do group ID for non-mesh topologies
+        for k in ("NCCL_IB_DISABLE", "NCCL_IB_HCA", "NCCL_CROSS_NIC", "NCCL_IB_GID_INDEX"):
+            env.pop(k, None)
+    elif ib_info.get("DETECTED_GID_INDEX"):
         env["NCCL_IB_GID_INDEX"] = ib_info["DETECTED_GID_INDEX"]
 
     return env

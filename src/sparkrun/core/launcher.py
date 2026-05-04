@@ -380,12 +380,6 @@ def launch_inference(
         run_kwargs["init_port"] = init_port
     if topology is not None:
         run_kwargs["topology"] = topology
-    if topology == "ring":
-        recipe.pre_exec.append(
-            "cd /usr/local/lib/python3.12/dist-packages && "
-            'grep -q VLLM_NCCL_INIT_DELAY vllm/distributed/parallel_state.py || '
-            'patch -p1 < /cache/huggingface/nccl_init_barrier.patch 2>/dev/null || true'
-        )
 
     # Build executor from layered config: CLI → recipe → defaults
     from scitrera_app_framework.api import Variables, EnvPlacement
