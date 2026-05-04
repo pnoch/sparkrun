@@ -196,6 +196,8 @@ def launch_inference(
         if "mods/fix-nccl-mesh-barrier" not in mods:
             mods.append("mods/fix-nccl-mesh-barrier")
             recipe.runtime_config["mods"] = mods
+        recipe.env.setdefault("PYTHONPATH", "/cache/huggingface")
+        recipe.env.setdefault("VLLM_NCCL_INIT_DELAY", "2.0")
 
     # -- Phase 2: Builder --
     builder = None
