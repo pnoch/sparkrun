@@ -170,6 +170,9 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
         env.update(generate_ring_nccl_overrides(ib_info))
         for k in ("NCCL_IB_DISABLE", "NCCL_IB_HCA", "NCCL_CROSS_NIC", "NCCL_IB_GID_INDEX"):
             env.pop(k, None)
+        mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").strip()
+        if mgmt_if:
+            env["NCCL_SOCKET_IFNAME"] = mgmt_if
     elif ib_info.get("DETECTED_GID_INDEX"):
         env["NCCL_IB_GID_INDEX"] = ib_info["DETECTED_GID_INDEX"]
 
