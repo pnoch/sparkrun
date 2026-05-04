@@ -190,6 +190,13 @@ def launch_inference(
     if p:
         p.phase_end()
 
+    # Inject barrier mod for ring topologies before the builder runs
+    if topology == "ring":
+        mods = list(recipe.runtime_config.setdefault("mods", []))
+        if "mods/fix-nccl-mesh-barrier" not in mods:
+            mods.append("mods/fix-nccl-mesh-barrier")
+            recipe.runtime_config["mods"] = mods
+
     # -- Phase 2: Builder --
     builder = None
     if recipe.builder:
@@ -380,11 +387,6 @@ def launch_inference(
         run_kwargs["init_port"] = init_port
     if topology is not None:
         run_kwargs["topology"] = topology
-    if topology == "ring":
-        mods = list(recipe.runtime_config.setdefault("mods", []))
-        if "mods/fix-nccl-mesh-barrier" not in mods:
-            mods.append("mods/fix-nccl-mesh-barrier")
-            recipe.runtime_config["mods"] = mods
 
     # Build executor from layered config: CLI → recipe → defaults
     from scitrera_app_framework.api import Variables, EnvPlacement

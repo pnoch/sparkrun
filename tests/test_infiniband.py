@@ -301,17 +301,17 @@ def test_ring_nccl_overrides_keys():
 
 
 def test_generate_nccl_env_ring_topology():
-    """Ring topology strips IB vars, Socket transport only."""
+    """Ring topology enables nccl-mesh-plugin with IB transport."""
     ib_info = {
         "IB_DETECTED": "1",
         "DETECTED_GID_INDEX": "3",
         "DETECTED_HCA_LIST": "mlx5_0,mlx5_1",
     }
     env = generate_nccl_env(ib_info, topology="ring")
-    assert env["NCCL_NET"] == "Socket"
-    assert env["NCCL_IGNORE_CPU_AFFINITY"] == "1"
-    for k in ("NCCL_IB_HCA", "NCCL_IB_DISABLE", "NCCL_CROSS_NIC", "NCCL_IB_GID_INDEX"):
-        assert k not in env, f"{k} should be stripped for ring"
+    assert env["NCCL_NET"] == "IB"
+    assert env["NCCL_NET_PLUGIN"] == "/cache/huggingface/libnccl-net.so"
+    assert env["LD_LIBRARY_PATH"] == "/cache/huggingface"
+    assert env["PYTHONPATH"] == "/cache/huggingface"
 
 
 def test_generate_nccl_env_no_ring_topology():
