@@ -88,32 +88,23 @@ def parse_ib_detect_output(output: str) -> dict[str, str]:
 
 
 def generate_ring_nccl_overrides(ib_info: dict[str, str]) -> dict[str, str]:
-    """NCCL overrides required for 3-node ring/mesh topology.
-
-    Ring topologies use direct CX7 links without a switch, so
-    RoCEv2/IB transport cannot work (no fabric routing).  Force
-    Socket transport (TCP) instead.  IB-related env vars are
-    stripped by the caller to prevent conflicts.
-    """
     return {
         "NCCL_NET": "Socket",
     }
 
 
 def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> dict[str, str]:
-    """Generate NCCL environment variables from IB detection results.
-
-    Args:
-        ib_info: Parsed output from :func:`parse_ib_detect_output`.
-        topology: CX7 topology (e.g. ``"ring"``).  When ``"ring"``,
-            additional overrides are applied for mesh networking.
-
-    Returns:
-        Dictionary of NCCL/network environment variables.
-        Empty dict if no InfiniBand was detected.
-    """
     if ib_info.get("IB_DETECTED") != "1":
         return {}
+
+    if topology == "ring":
+        logger.info("  Applying ring/mesh NCCL overrides (Socket transport)")
+        env = {"NCCL_IGNORE_CPU_AFFINITY": "1", "NCCL_NET": "Socket"}
+        mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").strip()
+        if mgmt_if:
+            env["NCCL_SOCKET_IFNAME"] = mgmt_if.split(",")[0]
+        env["NODE_IP"] = ib_info.get("DETECTED_MGMT_IP", "")
+        return env
 
     env: dict[str, str] = {
         "NCCL_IGNORE_CPU_AFFINITY": "1",
@@ -121,9 +112,8 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
         "NCCL_IB_DISABLE": "0",
         "NCCL_CROSS_NIC": "1",
     }
-    if topology != "ring":
-        if ib_info.get("DETECTED_HCA_LIST"):
-            env["NCCL_IB_HCA"] = ib_info["DETECTED_HCA_LIST"]
+    if ib_info.get("DETECTED_HCA_LIST"):
+        env["NCCL_IB_HCA"] = ib_info["DETECTED_HCA_LIST"]
 
     def _set_eth_interfaces(target):
         net_list = ib_info[target]
@@ -165,15 +155,7 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
 
     env["NODE_IP"] = ib_info.get("DETECTED_MGMT_IP", "")
 
-    if topology == "ring":
-        logger.info("  Applying ring/mesh NCCL overrides (Socket transport)")
-        env.update(generate_ring_nccl_overrides(ib_info))
-        for k in ("NCCL_IB_DISABLE", "NCCL_IB_HCA", "NCCL_CROSS_NIC", "NCCL_IB_GID_INDEX"):
-            env.pop(k, None)
-        mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").strip()
-        if mgmt_if:
-            env["NCCL_SOCKET_IFNAME"] = mgmt_if
-    elif ib_info.get("DETECTED_GID_INDEX"):
+    if ib_info.get("DETECTED_GID_INDEX"):
         env["NCCL_IB_GID_INDEX"] = ib_info["DETECTED_GID_INDEX"]
 
     return env

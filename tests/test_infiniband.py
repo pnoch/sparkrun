@@ -294,14 +294,14 @@ class TestValidateIbConnectivity:
 
 
 def test_ring_nccl_overrides_keys():
-    """Ring overrides set NCCL_NET=Socket for direct CX7 links."""
+    """Ring overrides set NCCL_NET=Socket for direct CX7 links without a switch."""
     overrides = generate_ring_nccl_overrides({})
     assert overrides["NCCL_NET"] == "Socket"
     assert len(overrides) == 1
 
 
 def test_generate_nccl_env_ring_topology():
-    """Ring topology adds mesh plugin and barrier delay."""
+    """Ring topology strips IB vars, Socket transport only."""
     ib_info = {
         "IB_DETECTED": "1",
         "DETECTED_GID_INDEX": "3",
@@ -309,8 +309,9 @@ def test_generate_nccl_env_ring_topology():
     }
     env = generate_nccl_env(ib_info, topology="ring")
     assert env["NCCL_NET"] == "Socket"
-    assert "NCCL_IB_HCA" not in env
-    assert "NCCL_IB_DISABLE" not in env
+    assert env["NCCL_IGNORE_CPU_AFFINITY"] == "1"
+    for k in ("NCCL_IB_HCA", "NCCL_IB_DISABLE", "NCCL_CROSS_NIC", "NCCL_IB_GID_INDEX"):
+        assert k not in env, f"{k} should be stripped for ring"
 
 
 def test_generate_nccl_env_no_ring_topology():

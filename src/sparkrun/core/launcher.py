@@ -380,6 +380,11 @@ def launch_inference(
         run_kwargs["init_port"] = init_port
     if topology is not None:
         run_kwargs["topology"] = topology
+    if topology == "ring":
+        mods = list(recipe.runtime_config.setdefault("mods", []))
+        if "mods/fix-nccl-mesh-barrier" not in mods:
+            mods.append("mods/fix-nccl-mesh-barrier")
+            recipe.runtime_config["mods"] = mods
 
     # Build executor from layered config: CLI → recipe → defaults
     from scitrera_app_framework.api import Variables, EnvPlacement
