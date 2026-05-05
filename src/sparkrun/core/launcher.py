@@ -190,15 +190,6 @@ def launch_inference(
     if p:
         p.phase_end()
 
-    # Inject barrier mod for ring topologies before the builder runs
-    if topology == "ring":
-        mods = list(recipe.runtime_config.setdefault("mods", []))
-        if "mods/fix-nccl-mesh-barrier" not in mods:
-            mods.append("mods/fix-nccl-mesh-barrier")
-            recipe.runtime_config["mods"] = mods
-        recipe.env.setdefault("PYTHONPATH", "/cache/huggingface")
-        recipe.env.setdefault("VLLM_NCCL_INIT_DELAY", "2.0")
-
     # -- Phase 2: Builder --
     builder = None
     if recipe.builder:

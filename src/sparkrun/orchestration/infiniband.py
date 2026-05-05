@@ -98,13 +98,17 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
         return {}
 
     if topology == "ring":
-        logger.info("  Applying ring/mesh NCCL overrides (Socket transport)")
-        env = {"NCCL_IGNORE_CPU_AFFINITY": "1", "NCCL_NET": "Socket"}
-        mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").strip()
-        if mgmt_if:
-            env["NCCL_SOCKET_IFNAME"] = mgmt_if.split(",")[0]
-        env["NODE_IP"] = ib_info.get("DETECTED_MGMT_IP", "")
-        return env
+        logger.info("  Applying ring/mesh NCCL overrides (nccl-mesh-plugin)")
+        return {
+            "NCCL_NET_PLUGIN": "/cache/huggingface/libnccl-net.so",
+            "LD_LIBRARY_PATH": "/cache/huggingface",
+            "PYTHONPATH": "/cache/huggingface",
+            "NCCL_NET": "IB",
+            "NCCL_IGNORE_CPU_AFFINITY": "1",
+            "NCCL_IB_HCA": ib_info.get("DETECTED_HCA_LIST", ""),
+            "NCCL_SOCKET_IFNAME": ib_info.get("DETECTED_SOCKET_IFNAME", "wlP9s9").split(",")[0],
+            "NODE_IP": ib_info.get("DETECTED_MGMT_IP", ""),
+        }
 
     env: dict[str, str] = {
         "NCCL_IGNORE_CPU_AFFINITY": "1",
