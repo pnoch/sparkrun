@@ -361,18 +361,19 @@ def run_native_cluster(
 ) -> int:
     """Orchestrate a multi-node native cluster.
 
-    Shared by SGLang and vLLM distributed.  Uses the two-phase launch
-    pattern (sleep infinity + exec) so that ``_pre_serve`` hooks run
-    between container startup and serve execution.
+    Shared by SGLang and vLLM distributed.  Uses a single-phase launch
+    for native mode (direct nohup) and two-phase (sleep + exec) for
+    containerised executors.
 
     Steps:
-        1. Clean up existing containers on all hosts.
-        2. Detect InfiniBand on all hosts (parallel).
-        3. Detect head node IP.
-        4. Launch ALL containers with ``sleep infinity``.
-        5. Run pre-serve hooks (pre_exec) on all containers.
-        6. Exec head serve command, wait for init port.
-        7. Exec worker serve commands in parallel.
+         1. Clean up existing containers on all hosts.
+         2. Detect InfiniBand on all hosts (parallel).
+         3. Detect head node IP.
+         4. Launch ALL containers with ``sleep infinity`` (Docker) or
+            directly start serve processes (native).
+         5. Run pre-serve hooks (pre_exec) on all containers (Docker only).
+         6. Exec head serve command, wait for init port.
+         7. Exec worker serve commands in parallel.
     """
     from sparkrun.orchestration.primitives import wait_for_port
     from sparkrun.orchestration.ssh import (
@@ -380,8 +381,10 @@ def run_native_cluster(
         start_log_capture,
         stop_log_capture,
     )
+    from sparkrun.orchestration.executor_native import NativeExecutor
 
     executor = runtime.executor
+    is_native = isinstance(executor, NativeExecutor)
 
     if progress:
         progress.begin_runtime_steps(7)
@@ -446,17 +449,79 @@ def run_native_cluster(
     for line in head_command.strip().splitlines():
         logger.info("  %s", line)
 
-    # Step 4: Launch ALL containers with sleep infinity
+    # Step 4: Launch containers/processes
     t0 = time.monotonic()
     if progress:
-        progress.step("Launching containers")
+        progress.step("Launching %s" % ("processes" if is_native else "containers"))
     else:
-        logger.info("Step 4/7: Launching containers with sleep infinity on all %d host(s)...", ctx.num_nodes)
+        logger.info("Step 4/7: Launching %s on all %d host(s)...",
+                     "processes" if is_native else "containers with sleep infinity",
+                     ctx.num_nodes)
 
     all_nodes: list[tuple[str, int, str]] = []
     for rank, host in enumerate(ctx.hosts):
         all_nodes.append((host, rank, executor.node_container_name(ctx.cluster_id, rank)))
 
+    if is_native:
+        # Single-phase: launch serve command directly with nohup
+        from sparkrun.orchestration.ssh import run_remote_script as _rrs
+
+        results = []
+        for host, rank, cname in all_nodes:
+            cmd = runtime.generate_node_command(
+                recipe=recipe,
+                overrides=overrides,
+                head_ip=head_ip,
+                num_nodes=ctx.num_nodes,
+                node_rank=rank,
+                init_port=init_port,
+                skip_keys=skip_keys,
+                hosts=ctx.hosts,
+            )
+            host_nccl_env = comm_env.get_env(host) if comm_env else None
+            script = executor.generate_direct_serve_script(
+                container_name=cname,
+                serve_command=cmd,
+                env=ctx.all_env,
+                nccl_env=host_nccl_env,
+            )
+            results.append(
+                _rrs(host, script, timeout=60, dry_run=ctx.dry_run, **ctx.ssh_kwargs)
+            )
+
+        if not ctx.dry_run:
+            failed = [(h, r) for (h, _r, _c), r in zip(all_nodes, results) if not r.success]
+            if failed:
+                for host, res in failed:
+                    logger.error("Failed to launch on %s: %s", host, res.stderr[:200])
+                return 1
+
+        # Wait for head to be ready
+        if not ctx.dry_run:
+            logger.info("  Waiting for head node %s:%d...", head_ip, init_port)
+            ready = wait_for_port(
+                ctx.head_host, init_port,
+                max_retries=60, retry_interval=2,
+                ssh_kwargs=ctx.ssh_kwargs, dry_run=ctx.dry_run,
+            )
+            if not ready:
+                logger.error("Head node failed to become ready on %s.", ctx.head_host)
+                return 1
+
+        logger.info("Step 4/7: All processes launched (%.1fs)", time.monotonic() - t0)
+        if progress:
+            progress.step_detail("  Pre-serve hooks skipped (native)")
+            progress.step_detail("  Head node serve launched")
+            progress.step_detail("  Worker nodes launched")
+
+        runtime._print_connection_info(ctx.hosts, ctx.cluster_id, per_node_logs=True)
+        if progress:
+            progress.end_runtime_steps()
+        if not detached:
+            _attach_foreground(runtime, ctx, follow)
+        return 0
+
+    # --- Containerised path (original) ---
     containers = [(host, cname) for host, _rank, cname in all_nodes]
     combined_docker_opts = (runtime.get_extra_docker_opts() or []) + (extra_docker_opts or [])
     rc = launch_containers_parallel(

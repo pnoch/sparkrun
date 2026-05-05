@@ -79,6 +79,7 @@ def launch_inference(
     cluster_id_override: str | None = None,
     # Executor config (dict for config chain layering)
     executor_config: dict | None = None,
+    executor_mode: str = "docker",
     extra_docker_opts: list[str] | None = None,
     # note: transition to rootless by default
     rootless: bool = True,
@@ -192,7 +193,7 @@ def launch_inference(
 
     # -- Phase 2: Builder --
     builder = None
-    if recipe.builder:
+    if recipe.builder and executor_mode != "native":
         if p:
             p.phase(2)
         from sparkrun.core.bootstrap import get_builder
@@ -385,38 +386,41 @@ def launch_inference(
     from scitrera_app_framework.api import Variables, EnvPlacement
     from sparkrun.orchestration.executor import EXECUTOR_DEFAULTS, ExecutorConfig
     from sparkrun.orchestration.executor_docker import DockerExecutor
+    from sparkrun.orchestration.executor_native import NativeExecutor
 
-    exec_adjustments = {}
-    if rootless:
-        exec_adjustments["privileged"] = False
-        exec_adjustments["security_opt"] = ["no-new-privileges"]
-        exec_adjustments["cap_add"] = []
-        exec_adjustments["ulimit"] = [
-            "memlock=-1:-1",
-            "stack=67108864",
-        ]
-        # TODO: confirm existence and/or adjust? (for future heterogeneous support??)
-        exec_adjustments["devices"] = [
-            "/dev/infiniband",
-        ]
-    if auto_user:
-        exec_adjustments["user"] = "$SHELL_USER"  # auto hint to use ssh user+group
+    if executor_mode == "native":
+        executor = NativeExecutor()
+    else:
+        exec_adjustments = {}
+        if rootless:
+            exec_adjustments["privileged"] = False
+            exec_adjustments["security_opt"] = ["no-new-privileges"]
+            exec_adjustments["cap_add"] = []
+            exec_adjustments["ulimit"] = [
+                "memlock=-1:-1",
+                "stack=67108864",
+            ]
+            exec_adjustments["devices"] = [
+                "/dev/infiniband",
+            ]
+        if auto_user:
+            exec_adjustments["user"] = "$SHELL_USER"
 
-    recipe_executor_config = getattr(recipe, "executor_config", None)
-    if not isinstance(recipe_executor_config, dict):
-        recipe_executor_config = {}
-    cli_exec_opts = executor_config if isinstance(executor_config, dict) else {}
-    exec_chain = Variables(
-        sources=(
-            cli_exec_opts,  # CLI flags (highest priority)
-            recipe_executor_config,  # recipe YAML
-            exec_adjustments,  # executor adjustments
-            EXECUTOR_DEFAULTS,  # hardcoded defaults
-        ),
-        env_placement=EnvPlacement.IGNORED,
-    )
-    exec_cfg = ExecutorConfig.from_chain(exec_chain)
-    executor = DockerExecutor(exec_cfg)  # TODO: future flexible executor
+        recipe_executor_config = getattr(recipe, "executor_config", None)
+        if not isinstance(recipe_executor_config, dict):
+            recipe_executor_config = {}
+        cli_exec_opts = executor_config if isinstance(executor_config, dict) else {}
+        exec_chain = Variables(
+            sources=(
+                cli_exec_opts,
+                recipe_executor_config,
+                exec_adjustments,
+                EXECUTOR_DEFAULTS,
+            ),
+            env_placement=EnvPlacement.IGNORED,
+        )
+        exec_cfg = ExecutorConfig.from_chain(exec_chain)
+        executor = DockerExecutor(exec_cfg)
 
     # Launch
     rc = runtime.run(
