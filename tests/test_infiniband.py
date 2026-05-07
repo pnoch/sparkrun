@@ -353,8 +353,8 @@ def test_ssh_kwargs_passed_through(mock_cmd):
     mock_cmd.assert_called_once_with(
         "10.0.0.1",
         "true",
-        connect_timeout=5,
-        timeout=10,
+        connect_timeout=2,
+        timeout=5,
         ssh_user="drew",
         ssh_key="/path/to/key",
         ssh_options=["-o", "Foo=bar"],

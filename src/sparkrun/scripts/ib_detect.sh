@@ -82,9 +82,16 @@ for ib_path in /sys/class/infiniband/*; do
     fi
 done
 
+# Detect management network interface (default route) and its IP
+DEFAULT_IF=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || echo "eth0")
+MGMT_IP=$(ip -4 addr show "$DEFAULT_IF" 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1)
+
 if [ ${#ACTIVE_HCAS[@]} -eq 0 ]; then
     echo "No active RDMA devices found." >&2
+    echo "No InfiniBand — reporting management interface for NCCL socket config" >&2
     echo "IB_DETECTED=0"
+    echo "DETECTED_SOCKET_IFNAME=$DEFAULT_IF"
+    echo "DETECTED_MGMT_IP=$MGMT_IP"
     exit 0
 fi
 

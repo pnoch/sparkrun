@@ -232,6 +232,7 @@ class VllmRayRuntime(VllmMixin, RuntimePlugin):
         dashboard_port: int = 8265,
         dashboard: bool = False,
         extra_docker_opts: list[str] | None = None,
+        topology: str | None = None,
         **kwargs,
     ) -> int:
         """Orchestrate a multi-node Ray cluster for vLLM.
@@ -257,7 +258,7 @@ class VllmRayRuntime(VllmMixin, RuntimePlugin):
         progress = kwargs.pop("progress", None)
         combined_docker_opts = (self.get_extra_docker_opts() or []) + (extra_docker_opts or [])
 
-        ctx = ClusterContext.build(self, hosts, image, cluster_id, env, cache_dir, config, dry_run)
+        ctx = ClusterContext.build(self, hosts, image, cluster_id, env, cache_dir, config, dry_run, topology=topology)
         head_container = self.executor.container_name(cluster_id, "head")
         worker_container = self.executor.container_name(cluster_id, "worker")
 

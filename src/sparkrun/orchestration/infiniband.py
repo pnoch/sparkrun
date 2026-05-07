@@ -93,22 +93,53 @@ def generate_ring_nccl_overrides(ib_info: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _nccl_socket_ifname_list(mgmt_if: str | None, ib_nets: str) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    if mgmt_if:
+        mgmt_if = mgmt_if.strip()
+        if mgmt_if and mgmt_if not in seen:
+            parts.append(mgmt_if)
+            seen.add(mgmt_if)
+    for ifname in (ib_nets or "").split(","):
+        ifname = ifname.strip()
+        if ifname and ifname not in seen:
+            parts.append(ifname)
+            seen.add(ifname)
+    return ",".join(parts)
+
+
 def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> dict[str, str]:
+    if topology == "ring":
+        mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").split(",")[0] or "wlP9s9"
+        ib_net_list = ib_info.get("DETECTED_NET_LIST", "")
+        socket_ifname = _nccl_socket_ifname_list(mgmt_if, ib_net_list)
+        logger.info("  Applying ring/mesh NCCL overrides (nccl-mesh-plugin)")
+        env = {
+            "NCCL_SOCKET_IFNAME": socket_ifname,
+            "NODE_IP": ib_info.get("DETECTED_MGMT_IP", ""),
+            "NCCL_IGNORE_CPU_AFFINITY": "1",
+            "NCCL_BLOCKING_WAIT": "1",
+            "NCCL_DEBUG": "INFO",
+        }
+        if ib_info.get("IB_DETECTED") == "1":
+            env.update({
+                "LD_LIBRARY_PATH": "/cache/huggingface",
+                "PYTHONPATH": "/cache/huggingface",
+                "NCCL_IB_DISABLE": "1",
+                "NCCL_P2P_DISABLE": "1",
+                "NCCL_SHM_DISABLE": "1",
+                "NCCL_MESH_DEBUG": "1",
+            })
+        else:
+            env.update({
+                "NCCL_IB_DISABLE": "1",
+                "NCCL_NET": "Socket",
+            })
+        return env
+
     if ib_info.get("IB_DETECTED") != "1":
         return {}
-
-    if topology == "ring":
-        logger.info("  Applying ring/mesh NCCL overrides (nccl-mesh-plugin)")
-        return {
-            "LD_LIBRARY_PATH": "/cache/huggingface",
-            "PYTHONPATH": "/cache/huggingface",
-            "NCCL_P2P_DISABLE": "1",
-            "NCCL_SHM_DISABLE": "1",
-            "NCCL_MESH_DEBUG": "1",
-            "NCCL_IGNORE_CPU_AFFINITY": "1",
-            "NCCL_SOCKET_IFNAME": ib_info.get("DETECTED_SOCKET_IFNAME", "wlP9s9").split(",")[0],
-            "NODE_IP": ib_info.get("DETECTED_MGMT_IP", ""),
-        }
 
     env: dict[str, str] = {
         "NCCL_IGNORE_CPU_AFFINITY": "1",
@@ -119,36 +150,22 @@ def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> d
     if ib_info.get("DETECTED_HCA_LIST"):
         env["NCCL_IB_HCA"] = ib_info["DETECTED_HCA_LIST"]
 
-    def _set_eth_interfaces(target):
-        net_list = ib_info[target]
+    if ib_info.get("DETECTED_SOCKET_IFNAME"):
+        net_list = ib_info["DETECTED_SOCKET_IFNAME"]
         env["MN_IF_NAME"] = net_list
         env["OMPI_MCA_btl_tcp_if_include"] = net_list
         env["GLOO_SOCKET_IFNAME"] = net_list
         env["TP_SOCKET_IFNAME"] = net_list
-
-    def _nccl_socket_ifname_list(mgmt_if: str | None, ib_nets: str) -> str:
-        parts: list[str] = []
-        seen: set[str] = set()
-        if mgmt_if:
-            mgmt_if = mgmt_if.strip()
-            if mgmt_if and mgmt_if not in seen:
-                parts.append(mgmt_if)
-                seen.add(mgmt_if)
-        for ifname in (ib_nets or "").split(","):
-            ifname = ifname.strip()
-            if ifname and ifname not in seen:
-                parts.append(ifname)
-                seen.add(ifname)
-        return ",".join(parts)
-
-    if ib_info.get("DETECTED_SOCKET_IFNAME"):
-        _set_eth_interfaces("DETECTED_SOCKET_IFNAME")
         env["NCCL_SOCKET_IFNAME"] = _nccl_socket_ifname_list(
             ib_info["DETECTED_SOCKET_IFNAME"],
             ib_info.get("DETECTED_NET_LIST", ""),
         )
     elif ib_info.get("DETECTED_NET_LIST"):
-        _set_eth_interfaces("DETECTED_NET_LIST")
+        net_list = ib_info["DETECTED_NET_LIST"]
+        env["MN_IF_NAME"] = net_list
+        env["OMPI_MCA_btl_tcp_if_include"] = net_list
+        env["GLOO_SOCKET_IFNAME"] = net_list
+        env["TP_SOCKET_IFNAME"] = net_list
         env["NCCL_SOCKET_IFNAME"] = _nccl_socket_ifname_list(
             None,
             ib_info["DETECTED_NET_LIST"],
@@ -205,6 +222,7 @@ def validate_ib_connectivity(
     if not ib_ip_map or dry_run:
         return ib_ip_map
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from sparkrun.orchestration.ssh import run_remote_command
 
     kw = ssh_kwargs or {}
@@ -212,24 +230,38 @@ def validate_ib_connectivity(
 
     for host, raw_ips in ib_ip_map.items():
         candidates = [ip.strip() for ip in raw_ips.split(",") if ip.strip()]
-        picked = None
-        for ip in candidates:
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            ip = candidates[0]
             logger.info("Verifying IB reachability for %s (%s)...", host, ip)
-            result = run_remote_command(
-                ip,
-                "true",
-                connect_timeout=5,
-                timeout=10,
-                **kw,
-            )
+            result = run_remote_command(ip, "true", connect_timeout=2, timeout=5, **kw)
             if result.success:
-                picked = ip
+                reachable[host] = ip
                 logger.info("  %s: IB reachable at %s", host, ip)
-                break
             else:
-                logger.info("  %s: IB unreachable at %s, trying next", host, ip)
+                logger.warning("  %s: IB IP %s unreachable", host, ip)
+            continue
+
+        # Multiple candidates (ring topology): probe all in parallel,
+        # pick the first that responds to minimise idle wait on
+        # unreachable subnets.
+        logger.info("Probing %d IB IPs for %s in parallel...", len(candidates), host)
+
+        def _probe(ip: str) -> tuple[str, bool]:
+            r = run_remote_command(ip, "true", connect_timeout=2, timeout=5, quiet=True, **kw)
+            return (ip, r.success)
+
+        picked = None
+        with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+            futures = {pool.submit(_probe, ip): ip for ip in candidates}
+            for future in as_completed(futures):
+                ip, ok = future.result()
+                if ok and picked is None:
+                    picked = ip
         if picked:
             reachable[host] = picked
+            logger.info("  %s: IB reachable at %s (probed %d IPs in parallel)", host, picked, len(candidates))
         else:
             logger.warning("  %s: no reachable IB IPs among %s", host, ", ".join(candidates))
 
