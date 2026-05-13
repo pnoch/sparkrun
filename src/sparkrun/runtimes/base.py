@@ -132,6 +132,18 @@ class RuntimePlugin(Plugin):
         """
         return {}
 
+    def prefer_ib_for_init_addr(self) -> bool:
+        """If True, the native cluster orchestrator substitutes IB IPs for
+        the cluster init / master address (and per-node master address)
+        when an IB IP map is available.
+
+        Used by NCCL-fabric-sensitive runtimes (e.g. Atlas) to route
+        bootstrap traffic over the high-speed fabric rather than the
+        management interface.  Defaults to ``False``; existing runtimes
+        keep using management IPs.
+        """
+        return False
+
     def cluster_strategy(self) -> str:
         """Return the clustering strategy for multi-node mode.
 
@@ -193,7 +205,8 @@ class RuntimePlugin(Plugin):
         hosts: list[str],
         config: SparkrunConfig | None = None,
         dry_run: bool = False,
-        transfer_mode: str = "local",
+        transfer_mode: str = "auto",
+        overrides: dict[str, Any] | None = None,
     ) -> None:
         """Pre-launch preparation (e.g., building container images).
 
@@ -207,6 +220,7 @@ class RuntimePlugin(Plugin):
             config: SparkrunConfig instance.
             dry_run: Show what would be done without executing.
             transfer_mode: ``"local"`` or ``"delegated"``.
+            overrides: CLI overrides dict (for reading resolved config values).
         """
         pass
 
@@ -656,6 +670,7 @@ class RuntimePlugin(Plugin):
                 overrides=overrides,
                 progress=progress,
                 extra_docker_opts=extra_docker_opts,
+                # TODO: kwargs?
             )
         return self._run_cluster(
             hosts=hosts,
@@ -1037,6 +1052,7 @@ class RuntimePlugin(Plugin):
         dry_run: bool = False,
         detached: bool = True,
         comm_env: ClusterCommEnv | None = None,
+        ib_ip_map: dict[str, str] | None = None,
         init_port: int = 25000,
         skip_keys: set[str] | frozenset[str] = frozenset(),
         banner_title: str = "Native Cluster Launcher",
@@ -1102,6 +1118,7 @@ class RuntimePlugin(Plugin):
             recipe=recipe,
             overrides=overrides,
             comm_env=comm_env,
+            ib_ip_map=ib_ip_map,
             init_port=init_port,
             skip_keys=skip_keys,
             banner_title=banner_title,

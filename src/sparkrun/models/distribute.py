@@ -141,7 +141,12 @@ def distribute_model_from_local(
         dry_run=dry_run,
     )
 
-    # Step 3: rsync model cache to all hosts in parallel
+    # Step 3: rsync model cache to all hosts in parallel.
+    # HF cache uses content-addressed blob filenames (blobs/<sha256>),
+    # so identical names always mean identical content.  --size-only is
+    # both correct and lets rsync skip already-synced shards instantly
+    # without reading them.  Quantized weights (NVFP4/safetensors) don't
+    # compress, so -z is wasted CPU and is omitted here.
     local_model_path = model_cache_path(model_id, local_cache)
     remote_model_path = model_cache_path(model_id, remote_cache)
     results = run_rsync_parallel(
@@ -151,6 +156,7 @@ def distribute_model_from_local(
         ssh_user=ssh_user,
         ssh_key=ssh_key,
         ssh_options=ssh_options,
+        rsync_options=["-a", "--size-only", "--mkpath", "--partial", "--links"],
         timeout=timeout,
         dry_run=dry_run,
     )
@@ -170,6 +176,7 @@ def distribute_model_from_head(
     hosts: list[str],
     cache_dir: str | None = None,
     revision: str | None = None,
+    hf_token: str | None = None,
     ssh_user: str | None = None,
     ssh_key: str | None = None,
     ssh_options: list[str] | None = None,
@@ -188,6 +195,7 @@ def distribute_model_from_head(
         hosts: Cluster hostnames (``hosts[0]`` is the head).
         cache_dir: Override for the HuggingFace cache directory.
         revision: Optional revision (branch, tag, or commit hash).
+        hf_token: Optional HuggingFace API token for gated models.
         ssh_user: Optional SSH username.
         ssh_key: Optional path to SSH private key.
         ssh_options: Additional SSH options.
@@ -201,6 +209,7 @@ def distribute_model_from_head(
         List of hostnames where distribution failed (empty = full success).
     """
     from sparkrun.orchestration.distribution import _distribute_from_head
+    from sparkrun.utils.shell import quote
 
     if not hosts:
         return []
@@ -227,6 +236,10 @@ def distribute_model_from_head(
             cache=cache,
             revision_flag=revision_flag,
         )
+
+    # Inject HF token for gated models
+    if hf_token:
+        ensure_script = 'export HF_TOKEN="' + str(quote(hf_token)) + '";\n' + ensure_script
 
     # Build distribute script (rsync from head to workers)
     targets = worker_transfer_hosts or hosts[1:]

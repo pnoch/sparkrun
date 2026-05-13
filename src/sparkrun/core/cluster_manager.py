@@ -369,10 +369,12 @@ class ClusterManager:
             Default cluster name if set and cluster exists, None otherwise
         """
         if not self.default_file.exists():
+            logger.debug("no cluster default file exists")
             return None
 
         default_name = self.default_file.read_text().strip()
         if not default_name:
+            logger.debug("default cluster file is empty")
             return None
 
         # Verify cluster still exists
@@ -382,6 +384,7 @@ class ClusterManager:
             self.unset_default()
             return None
 
+        logger.debug("Resolved default cluster is '%s'", default_name)
         return default_name
 
     def _write_cluster(self, cluster_def: ClusterDefinition) -> None:
@@ -417,6 +420,7 @@ class ClusterManager:
         if not data:
             raise ClusterError(f"Invalid cluster file format: {cluster_path}")
 
+        logger.debug("Read cluster definition from %s", cluster_path)
         return ClusterDefinition(
             name=data.get("name", cluster_path.stem),
             hosts=data.get("hosts", []),
@@ -572,11 +576,12 @@ class ResolvedClusterConfig:
     def resolve_transfer_config(self, config, transfer_mode_override: str | None = None):
         """Resolve transfer configuration against defaults.
 
-        When the cluster has a configured ``user`` that differs from the OS
-        user and no explicit ``cache_dir`` is set, the remote cache dir is
-        derived from the SSH user's home directory (``~<user>/.cache/huggingface``)
-        rather than the local user's.  This prevents permission errors when
-        the cluster user can't write to the control user's home directory.
+        Returns ``None`` for ``remote_cache_dir`` when no explicit cluster
+        ``cache_dir`` is configured.  Downstream callers (e.g. ``launch_inference``)
+        are responsible for resolving ``None`` against the actual remote, typically
+        via :func:`sparkrun.orchestration.primitives.probe_remote_hf_cache` so the
+        path reflects the SSH login user's ``$HOME`` / ``HF_HOME`` rather than the
+        control machine's.
 
         Args:
             config: SparkrunConfig instance.
@@ -584,26 +589,10 @@ class ResolvedClusterConfig:
 
         Returns:
             Tuple of ``(local_cache_dir, remote_cache_dir, effective_transfer_mode, effective_transfer_interface)``.
+            ``remote_cache_dir`` is ``None`` unless the cluster sets ``cache_dir`` explicitly.
         """
-        import os
-        import sys
-
         local_cache_dir = str(config.hf_cache_dir)
-        if self.cache_dir:
-            remote_cache_dir = self.cache_dir
-        elif self.user and self.user != os.environ.get("USER"):
-            # Cross-user: derive remote cache from the SSH user's home.
-            # Use absolute path (not ~user) because tilde isn't expanded
-            # inside quoted strings in bash scripts.
-            remote_cache_dir = "/home/%s/.cache/huggingface" % self.user
-        elif sys.platform != "linux":
-            # Control machine is non-Linux (e.g. macOS) but targets are
-            # Linux — derive remote cache from the SSH user if configured,
-            # otherwise fall back to the OS username.
-            _user = self.user or os.environ.get("USER", "user")
-            remote_cache_dir = "/home/%s/.cache/huggingface" % _user
-        else:
-            remote_cache_dir = local_cache_dir
+        remote_cache_dir = self.cache_dir if self.cache_dir else None
         effective_transfer_mode = transfer_mode_override or self.transfer_mode or "auto"
         effective_transfer_interface = self.transfer_interface
         return local_cache_dir, remote_cache_dir, effective_transfer_mode, effective_transfer_interface
@@ -630,8 +619,12 @@ def resolve_cluster_config(
     resolved = cluster_name
     if not resolved and not hosts and not hosts_file:
         resolved = cluster_mgr.get_default() if cluster_mgr else None
+        logger.debug("No cluster given, trying (default)  cluster '%s'", resolved)
+    else:
+        logger.debug("Cluster resolution: %s", resolved)
 
     if not resolved:
+        logger.debug("No cluster resolution found, returning default config")
         return cfg
 
     cfg.name = resolved
@@ -644,11 +637,14 @@ def resolve_cluster_config(
     # User is always resolved (even with explicit --hosts, if --cluster given)
     cfg.user = cluster_def.user
 
-    # transfer_mode, transfer_interface, and cache_dir only apply when hosts come from the cluster
+    # transfer_mode, transfer_interface, cache_dir, and topology only apply when hosts come from the cluster
     if not hosts and not hosts_file:
+        logger.debug("Using cluster config for transfer_mode, transfer_interface, cache_dir, and topology")
         cfg.transfer_mode = cluster_def.transfer_mode
         cfg.transfer_interface = cluster_def.transfer_interface
         cfg.cache_dir = cluster_def.cache_dir
         cfg.topology = cluster_def.topology
+    else:
+        logger.debug("explicit hosts; not using cluster for transfer_mode, transfer_interface, cache_dir, and topology")
 
     return cfg
