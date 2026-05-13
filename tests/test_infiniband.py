@@ -301,19 +301,18 @@ def test_ring_nccl_overrides_keys():
 
 
 def test_generate_nccl_env_ring_topology():
-    """Ring topology enables nccl-mesh-plugin via LD_LIBRARY_PATH."""
+    """Ring topology uses Socket transport with deterministic overrides."""
     ib_info = {
         "IB_DETECTED": "1",
         "DETECTED_GID_INDEX": "3",
         "DETECTED_HCA_LIST": "mlx5_0,mlx5_1",
     }
     env = generate_nccl_env(ib_info, topology="ring")
-    # NCCL_NET_PLUGIN is intentionally NOT set — it's a suffix for
-    # libnccl-net-${SUFFIX}.so, not a full path. The plugin is discovered
-    # via LD_LIBRARY_PATH=/cache/huggingface which contains libnccl-net.so.
     assert "NCCL_NET_PLUGIN" not in env
-    assert env["LD_LIBRARY_PATH"] == "/cache/huggingface"
-    assert env["PYTHONPATH"] == "/cache/huggingface"
+    assert env["NCCL_NET"] == "Socket"
+    assert env["NCCL_IB_DISABLE"] == "1"
+    assert env["NCCL_P2P_DISABLE"] == "1"
+    assert env["NCCL_SHM_DISABLE"] == "1"
 
 
 def test_generate_nccl_env_no_ring_topology():

@@ -130,6 +130,8 @@ class VllmRayRuntime(VllmMixin, RuntimePlugin):
             **RuntimePlugin.get_cluster_env(self, head_ip, num_nodes),
             "RAY_memory_monitor_refresh_ms": "0",
             "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+            "NCCL_CUMEM_ENABLE": "0",
+            "VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH": "0",
         }
 
     # --- Ray env propagation fix (issue #135) ---
@@ -372,18 +374,8 @@ class VllmRayRuntime(VllmMixin, RuntimePlugin):
 
         # Step 4: Launch Ray workers (parallel)
         t0 = time.monotonic()
-        if ctx.worker_hosts:
-            if progress:
-                progress.step("Launching Ray workers")
-            else:
-                logger.info(
-                    "Step 4/5: Launching %d Ray worker(s) on %s...",
-                    len(ctx.worker_hosts),
-                    ", ".join(ctx.worker_hosts),
-                )
-            # Generate per-host worker scripts so heterogeneous management
-            # interfaces (e.g. wired on head, wifi on a worker) get the
-            # right GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME / etc.
+
+        def _launch_workers_once() -> list:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             with ThreadPoolExecutor(max_workers=len(ctx.worker_hosts)) as _wpool:
@@ -410,21 +402,82 @@ class VllmRayRuntime(VllmMixin, RuntimePlugin):
                             **ctx.ssh_kwargs,
                         )
                     ] = _whost
-                worker_results = [f.result() for f in as_completed(_wfutures)]
+                return [f.result() for f in as_completed(_wfutures)]
+
+        def _active_ray_nodes() -> int:
+            status_script = (
+                "docker exec %s bash -lc \"ray status 2>/dev/null | "
+                "sed -n '/^Active:/,/^Pending:/p' | "
+                "grep -Ec '^[[:space:]]*[0-9]+[[:space:]]+node_'\""
+                % head_container
+            )
+            res = run_remote_script(
+                ctx.head_host,
+                status_script,
+                timeout=20,
+                dry_run=dry_run,
+                **ctx.ssh_kwargs,
+            )
+            if not res.success:
+                return 0
+            try:
+                return int((res.last_line or "0").strip())
+            except Exception:
+                return 0
+
+        if ctx.worker_hosts:
+            if progress:
+                progress.step("Launching Ray workers")
+            else:
+                logger.info(
+                    "Step 4/5: Launching %d Ray worker(s) on %s...",
+                    len(ctx.worker_hosts),
+                    ", ".join(ctx.worker_hosts),
+                )
+
+            worker_results = _launch_workers_once()
             failed = [r for r in worker_results if not r.success and not dry_run]
             for r in failed:
-                logger.warning(
-                    "  Worker launch may have failed on %s: %s",
-                    r.host,
-                    r.stderr[:100],
-                )
+                logger.warning("  Worker launch may have failed on %s: %s", r.host, r.stderr[:100])
+
             if not dry_run:
-                logger.info(
-                    "  Waiting 3s for workers to connect to head at %s:%d...",
-                    head_ip,
-                    ray_port,
-                )
-                time.sleep(3)
+                expected_nodes = len(ctx.hosts)
+                logger.info("  Waiting for Ray cluster to report %d active node(s)...", expected_nodes)
+                deadline = time.monotonic() + 90
+                active = 0
+                while time.monotonic() < deadline:
+                    active = _active_ray_nodes()
+                    if active >= expected_nodes:
+                        break
+                    time.sleep(3)
+
+                if active < expected_nodes:
+                    logger.warning(
+                        "  Ray has %d/%d active node(s) after initial worker launch; retrying once...",
+                        active,
+                        expected_nodes,
+                    )
+                    worker_results = _launch_workers_once()
+                    failed = [r for r in worker_results if not r.success]
+                    for r in failed:
+                        logger.warning("  Worker relaunch may have failed on %s: %s", r.host, r.stderr[:100])
+
+                    deadline = time.monotonic() + 90
+                    while time.monotonic() < deadline:
+                        active = _active_ray_nodes()
+                        if active >= expected_nodes:
+                            break
+                        time.sleep(3)
+
+                if active < expected_nodes:
+                    logger.error(
+                        "Ray worker readiness check failed: %d/%d active nodes. "
+                        "Worker container may be exiting early.",
+                        active,
+                        expected_nodes,
+                    )
+                    return 1
+
             if not progress:
                 logger.info("Step 4/5: Workers launched (%.1fs)", time.monotonic() - t0)
         else:

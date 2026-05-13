@@ -7,6 +7,7 @@ via SSH bash -s.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass, field
 
@@ -112,29 +113,21 @@ def _nccl_socket_ifname_list(mgmt_if: str | None, ib_nets: str) -> str:
 def generate_nccl_env(ib_info: dict[str, str], topology: str | None = None) -> dict[str, str]:
     if topology == "ring":
         mgmt_if = ib_info.get("DETECTED_SOCKET_IFNAME", "").split(",")[0] or "wlP9s9"
-        ib_net_list = ib_info.get("DETECTED_NET_LIST", "")
-        socket_ifname = _nccl_socket_ifname_list(mgmt_if, ib_net_list)
-        logger.info("  Applying ring/mesh NCCL overrides (nccl-mesh-plugin)")
+        socket_ifname = mgmt_if
+        logger.info("  Applying ring NCCL overrides (Socket over management IF)")
         env = {
             "NCCL_SOCKET_IFNAME": socket_ifname,
             "NODE_IP": ib_info.get("DETECTED_MGMT_IP", ""),
             "NCCL_IGNORE_CPU_AFFINITY": "1",
             "NCCL_BLOCKING_WAIT": "1",
             "NCCL_DEBUG": "INFO",
+            "NCCL_IB_DISABLE": "1",
+            "NCCL_NET": "Socket",
         }
         if ib_info.get("IB_DETECTED") == "1":
             env.update({
-                "LD_LIBRARY_PATH": "/cache/huggingface",
-                "PYTHONPATH": "/cache/huggingface",
-                "NCCL_IB_DISABLE": "1",
                 "NCCL_P2P_DISABLE": "1",
                 "NCCL_SHM_DISABLE": "1",
-                "NCCL_MESH_DEBUG": "1",
-            })
-        else:
-            env.update({
-                "NCCL_IB_DISABLE": "1",
-                "NCCL_NET": "Socket",
             })
         return env
 
@@ -195,6 +188,20 @@ def extract_ib_ips(ib_info: dict[str, str]) -> list[str]:
     if not raw:
         return []
     return [ip.strip() for ip in raw.split(",") if ip.strip()]
+
+
+def _if_ip_pairs(ib_info: dict[str, str]) -> list[tuple[str, str]]:
+    ifnames = [x.strip() for x in ib_info.get("DETECTED_NET_LIST", "").split(",") if x.strip()]
+    ips = extract_ib_ips(ib_info)
+    n = min(len(ifnames), len(ips))
+    return [(ifnames[i], ips[i]) for i in range(n)]
+
+
+def _ipv4_24(ip: str) -> ipaddress.IPv4Network | None:
+    try:
+        return ipaddress.ip_network(f"{ip}/24", strict=False)
+    except Exception:
+        return None
 
 
 def validate_ib_connectivity(
@@ -316,11 +323,13 @@ def detect_ib_for_hosts(
     per_host_env: dict[str, dict[str, str]] = {}
     ib_ip_map: dict[str, str] = {}
     mgmt_ip_map: dict[str, str] = {}
+    ib_info_by_host: dict[str, dict[str, str]] = {}
 
     for result in ib_results:
         if not result.success:
             continue
         ib_info = parse_ib_detect_output(result.stdout)
+        ib_info_by_host[result.host] = ib_info
 
         # Per-host comm env (so heterogeneous socket interfaces work)
         host_env = generate_nccl_env(ib_info, topology=topology)
@@ -341,6 +350,47 @@ def detect_ib_for_hosts(
         if mgmt_ip:
             mgmt_ip_map[result.host] = mgmt_ip
             logger.debug("  %s mgmt IP: %s", result.host, mgmt_ip)
+
+    # Ring topology, 2-node case: choose a matching CX7 subnet pair and
+    # override NCCL_SOCKET_IFNAME per host so both peers use the same link.
+    if topology == "ring" and len(hosts) == 2:
+        h0, h1 = hosts[0], hosts[1]
+        i0 = ib_info_by_host.get(h0, {})
+        i1 = ib_info_by_host.get(h1, {})
+        if i0.get("IB_DETECTED") == "1" and i1.get("IB_DETECTED") == "1":
+            p0 = _if_ip_pairs(i0)
+            p1 = _if_ip_pairs(i1)
+            chosen: tuple[str, str, str] | None = None
+            for if0, ip0 in p0:
+                n0 = _ipv4_24(ip0)
+                if n0 is None:
+                    continue
+                for if1, ip1 in p1:
+                    n1 = _ipv4_24(ip1)
+                    if n1 is None:
+                        continue
+                    if n0 == n1:
+                        chosen = (if0, if1, str(n0))
+                        break
+                if chosen is not None:
+                    break
+
+            if chosen is not None:
+                if0, if1, subnet = chosen
+                if h0 in per_host_env:
+                    per_host_env[h0]["NCCL_SOCKET_IFNAME"] = if0
+                if h1 in per_host_env:
+                    per_host_env[h1]["NCCL_SOCKET_IFNAME"] = if1
+                logger.info(
+                    "  Ring CX7 link selected: %s(%s) <-> %s(%s) on %s",
+                    h0,
+                    if0,
+                    h1,
+                    if1,
+                    subnet,
+                )
+            else:
+                logger.info("  Ring CX7 link not resolved, using management interface socket path")
 
     comm_env = ClusterCommEnv.from_per_host(per_host_env)
     if comm_env.is_empty():

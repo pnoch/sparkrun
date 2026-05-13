@@ -16,7 +16,7 @@ from sparkrun.utils.shell import quote, quote_list, args_list_to_shell_str
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_RSYNC_OPTIONS = ["-az", "--mkpath", "--partial", "--links"]
+_DEFAULT_RSYNC_OPTIONS = ["-az", "--no-times", "--mkpath", "--partial", "--links", "--size-only"]
 
 
 @dataclass
