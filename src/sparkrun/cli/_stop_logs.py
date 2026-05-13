@@ -278,13 +278,27 @@ def logs_cmd(ctx, target, hosts, hosts_file, cluster_name, tp_override, port, se
                 tail=tail,
             )
         else:
-            # No metadata / unknown runtime — fall back to generic docker logs
+            # No metadata / unknown runtime — try native node_0 first (common for
+            # vllm-distributed / sglang), then head (vllm-ray), then solo.
+            from sparkrun.orchestration.docker import generate_node_container_name, generate_container_name
             from sparkrun.orchestration.primitives import build_ssh_kwargs
             from sparkrun.orchestration.ssh import stream_remote_logs
 
             ssh_kwargs = build_ssh_kwargs(config)
-            container_name = cluster_id + "_head" if len(host_list) > 1 else cluster_id + "_solo"
-            stream_remote_logs(host_list[0], container_name, tail=tail, **ssh_kwargs)
+            if len(host_list) > 1:
+                candidates = [
+                    generate_node_container_name(cluster_id, 0),
+                    generate_container_name(cluster_id, "head"),
+                ]
+            else:
+                candidates = [generate_container_name(cluster_id, "solo")]
+
+            for container_name in candidates:
+                try:
+                    stream_remote_logs(host_list[0], container_name, tail=tail, **ssh_kwargs)
+                    break
+                except (RuntimeError, Exception):
+                    continue
         return
 
     # Branch: recipe name target (original path)
